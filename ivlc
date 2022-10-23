@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+
+set -e
+
+# 1 is pid, 2 is playlistFile, 3 is uuid
+vlcTrack(){
+
+  while true ; do
+
+    local playlistJson
+    local uuid
+    local lastTitle
+    local jobCount
+
+    trap : SIGUSR1
+
+    sleep 1m &
+    echo $! > /run/spAcorOwnF3iles/ivlcPid
+    wait $! || true
+
+    jobCount=$(jobs -p | wc -l)
+
+    if test $jobCount -eq 0 ; then
+      # sleep finished naturally, nothing to do
+      :
+    elif test $jobCount -eq 1 ; then
+      # we were interrupted
+      kill %%
+    else
+      # what?
+      notify-send 'look at ivlc'
+    fi
+
+    playlistJson=$(cat "$2")
+
+    ps -p "$1" > /dev/null
+    uuid=$(qjs -e 'print( JSON.parse(scriptArgs.shift()).uuid );' -- "$playlistJson")
+
+    test $uuid = $3
+
+    lastTitle=$(
+      echo playlist | nc -q 0 localhost 4212 |
+      grep -P --only-matching '^\| ++\*\d++' | grep -P --only-matching '\d++'
+    )
+
+    qjs -e '
+      let ivlcObj = JSON.parse(scriptArgs.shift());
+      ivlcObj.currentVideo = scriptArgs.shift();
+      print(JSON.stringify(ivlcObj, null, 2));' -- "$playlistJson" "$lastTitle" > "$2"
+  done
+}
+
+ivlc(){
+  readonly playlistsPath=~/Desktop/ivlcPlaylists
+  readonly lastPlaylistFile=/var/tmp/vlc_last_playlist
+
+  local playlistJson
+  local mode=play
+  local saveAsLastPlaylist=1
+  local playlistTitle
+  local playlistFile
+  local vlcArgsGiven
+  local optionsGiven
+
+  optionsGiven=$(getopt --shell sh -o 'h' --longoptions 'create:,no-save,list,vlc-args:,help' -- "$@")
+
+  eval set -- "$optionsGiven"
+
+  while true; do
+    case "$1" in
+      --create)
+        mode=create
+        playlistTitle=$2
+        shift
+        ;;
+      --vlc-args)
+        vlcArgsGiven=$2
+        shift
+        ;;
+      --list)
+        ls "$playlistsPath"
+        exit
+        ;;
+      --help|-h)
+        echo 'create:,no-save,list,vlc-args:,help'
+        exit
+        ;;
+      --no-save)
+        saveAsLastPlaylist=0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo 'way fucky'
+        exit 2
+        ;;
+    esac
+
+    shift
+  done
+
+  if test $mode = create ; then
+    ls -d "$@" >/dev/null
+    playlistFile="$playlistsPath/$playlistTitle"
+
+    playlistJson=$(
+      # This uses the script args n stuff
+      for title ; do readlink -e -z "$title" ; done |
+
+      xargs -0 qjs -e '
+        let playlistObj = {};
+        playlistObj.uuid = scriptArgs.shift();
+        playlistObj.vlcArgs = scriptArgs.shift();
+        playlistObj.titles = scriptArgs;
+        print(JSON.stringify(playlistObj, null, 2));' -- "$(uuidgen --time)" "$vlcArgsGiven"
+    )
+
+    echo "$playlistJson" > "$playlistFile"
+
+    if test $saveAsLastPlaylist -eq 1 ; then
+      echo "$playlistTitle" > "$lastPlaylistFile"
+    fi
+
+    exit
+  fi
+
+  if test $mode = play ; then
+    local usedLastPlaylist=0
+    local currentVideo
+    local vlcArgs
+    local uuid
+
+    playlistTitle=$1
+
+    if test -z "$playlistTitle" ; then
+      if test -f "$lastPlaylistFile" ; then
+        playlistTitle=$(cat "$lastPlaylistFile")
+        usedLastPlaylist=1
+      else
+        echo "sorry, we don't have a last playlist"
+        exit 1
+      fi
+    fi
+
+    playlistFile="$playlistsPath/$playlistTitle"
+
+    if test ! -f "$playlistFile" ; then
+      if test $usedLastPlaylist -eq 1 ; then
+        rm "$lastPlaylistFile"
+      fi
+
+      echo "no such playlist: \"$playlistFile\""
+      exit 1
+    fi
+
+    playlistJson=$(cat "$playlistFile")
+    currentVideo=$(qjs -e 'print( JSON.parse(scriptArgs.shift()).currentVideo ?? "" );' -- "$playlistJson" )
+    vlcArgs=$(qjs -e 'print( JSON.parse(scriptArgs.shift()).vlcArgs ?? "" );' -- "$playlistJson")
+    uuid=$(qjs -e 'print( JSON.parse(scriptArgs.shift()).uuid );' -- "$playlistJson" )
+
+    qjs --std -e '
+      JSON.parse(scriptArgs.shift()).titles.forEach(title => {
+        std.printf("%s\0", title);
+      });' -- "$playlistJson" | xargs -0 ls >/dev/null
+
+    if test $saveAsLastPlaylist -eq 1 ; then
+      echo "$playlistTitle" > "$lastPlaylistFile"
+    fi
+
+    qjs --std -e '
+      JSON.parse(scriptArgs.shift()).titles.forEach(title => {
+        std.printf("%s\0", title);
+      });' -- "$playlistJson" | eval xargs -0 vlc "$vlcArgs" >/dev/null 2>/dev/null &
+
+    disown $!
+    vlcTrack $! "$playlistFile" "$uuid" &
+    disown $!
+
+    if test -n "$currentVideo" ; then
+      (sleep 2; echo "goto $currentVideo" | nc -q 0 localhost 4212 >/dev/null 2>/dev/null) &
+      disown $!
+    fi
+
+    exit
+  fi
+}
+
+ivlc "$@"
+

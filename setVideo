@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+set -e
+
+test -f /run/spAcorOwnF3iles/ivlcPid
+pid=$(cat /run/spAcorOwnF3iles/ivlcPid)
+ppid=$(ps -p "$pid" -o ppid=)
+
+pgrep -f 'bash /usr/local/bin/ivlc' | while read possiblePpid ; do
+  if test $possiblePpid = $ppid ; then
+    /usr/bin/kill -SIGUSR1 "$pid"
+  fi
+done
